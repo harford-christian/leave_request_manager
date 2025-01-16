@@ -1,0 +1,7 @@
+@echo off
+cd /d "Path\to\your\projectdirectory"
+"Path\to\your\program" program_name
+if errorlevel 1 (
+    echo Script failed with error code %errorlevel%
+    exit /b %errorlevel%
+)
