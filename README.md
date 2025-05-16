@@ -5,12 +5,19 @@ This program is designed to take information from the “Leave & Sub Requests”
 Description of each file in the project directory:
 
 chromedriver-win64 – windows 64-bit installation of chromedriver, the driver that runs the script
+
 venv – a virtual environment; creates a separate space for the program to run in
+
 .env – a file used to store sensitive information
+
 deleted_events_list – a collection of IDs of events that were deleted; prevents unwanted events
+
 leave_requests – the program itself
+
 requirements – a list of all dependencies and their versions; used to aid in dependency installation
+
 run_leave_requests.bat – batch file that runs the program
+
 credentials.json – this file must be downloaded from the Google Cloud Console after a service account is created
 
 How to run the program manually:
