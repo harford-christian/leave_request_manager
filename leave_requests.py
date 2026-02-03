@@ -69,7 +69,7 @@ class LeaveRequestCalendar:
     def setup_chrome_driver(self):
         """Set up Chrome WebDriver with download settings"""
         chrome_options = webdriver.ChromeOptions()
-        #chrome_options.add_argument("--headless") # Runs the script without opening a browser window
+        chrome_options.add_argument("--headless") # Runs the script without opening a browser window
         chrome_options.add_argument("--disable-gpu") # Disable GPU rendering
         chrome_options.add_argument("--disable-extensions") # Disables extensions that may interfere with the script
         chrome_options.add_argument("--disable-software-rasterizer")  # Add this to avoid GPU rendering issues
@@ -84,7 +84,7 @@ class LeaveRequestCalendar:
         try:
             # Navigate to the website
             driver.get(website)
-            
+                      
             # Wait for page to load and elements to be present
             wait = WebDriverWait(driver, 20)
             
@@ -143,25 +143,30 @@ class LeaveRequestCalendar:
             approval_dropdown.click()
             approval_dropdown.clear()
             approval_dropdown.send_keys('Leave & Sub Request')
-            time.sleep(1)
+            approval_dropdown.send_keys(Keys.ENTER)
+            approval_dropdown.send_keys('Leave: HCS-Related')
+            approval_dropdown.send_keys(Keys.ENTER)
+            approval_dropdown.send_keys('Leave: Late Arrival/Early Departure')
+            approval_dropdown.send_keys(Keys.ENTER)
+            approval_dropdown.send_keys('Leave: Other Paid Leave')
+            approval_dropdown.send_keys(Keys.ENTER)
+            approval_dropdown.send_keys('Leave: Personal Leave')
+            approval_dropdown.send_keys(Keys.ENTER)
+            approval_dropdown.send_keys('Leave: Sick Leave')
             approval_dropdown.send_keys(Keys.ENTER)
             
-            # Click somewhere neutral to close the previous dropdown
-            body_element = driver.find_element(By.TAG_NAME, "body")
-            body_element.click()
-            
-            # These lines are used for testing; they select the time period to be the last month and can be uncommented if needed
-            button = driver.find_element(By.XPATH, "//div[contains(@class, 'sc-bbmXgH') and contains(@class, 'bZKFrp') and text()='1 Month']")
-            button.click()
+            # Select the time period to be the last month (can be commented out if needed)
+            # button = driver.find_element(By.XPATH, "//div[normalize-space(text())='1 Month']")
+            # driver.execute_script("arguments[0].click();", button)
             
             # Select the "Status" dropdown
             status_dropdown = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@data-testid='inputReadOnly']//span[text()='Select']")))
             status_dropdown.click()
             
-            """# Uncomment this section if you want to select "pending" from the dropdown
+            '''# Uncomment this section if you want to select "pending" from the dropdown
             # Select "Pending" from the dropdown
             select_pending = wait.until(EC.element_to_be_clickable((By.ID, 'dropdownOptions_pending')))
-            select_pending.click()"""
+            select_pending.click()'''
             
             # Select "Approved" from the dropdown
             select_approved = wait.until(EC.element_to_be_clickable((By.ID, 'dropdownOptions_pass')))
@@ -234,15 +239,86 @@ class LeaveRequestCalendar:
                 description = event.get('description', '')
                 if 'Approval ID:' in description:
                     approval_id = description.split('Approval ID:')[1].split('\n')[0].strip()
+                    
+                    # Extract substitute name from existing calendar event
+                    current_summary = event.get('summary', '')
+                    sub_name_in_calendar = None
+                    
+                    # Check for the format: "{sub_name}/{full_name}/{type}"
+                    if '/' in current_summary:
+                        parts = current_summary.split('/')
+                        if len(parts) >= 1:
+                            sub_name_in_calendar = parts[0].strip()
+                    
+                    # Get event creation/update time for duplicate detection
+                    event_created = event.get('created', '')
+                    event_updated = event.get('updated', '')
+                    
                     events.append({
                         'event_id': event['id'],
                         'approval_id': approval_id,
-                        'event': event
+                        'event': event,
+                        'calendar_sub_name': sub_name_in_calendar,
+                        'created': event_created,
+                        'updated': event_updated
                     })
             page_token = events_result.get('nextPageToken')
             if not page_token:
                 break
-        return {event['approval_id']: event for event in events}
+        
+        # Handle duplicates: keep the most recent event, delete older ones
+        approval_id_map = {}
+        duplicates_deleted = 0
+        
+        for event_info in events:
+            approval_id = event_info['approval_id']
+            
+            if approval_id in approval_id_map:
+                # Duplicate found - compare timestamps to keep the newest
+                existing_event = approval_id_map[approval_id]
+                
+                # Compare by 'updated' timestamp (most recent modification)
+                existing_updated = existing_event['updated']
+                current_updated = event_info['updated']
+                
+                if current_updated > existing_updated:
+                    # Current event is newer - delete the old one
+                    try:
+                        self.calendar_service.events().delete(
+                            calendarId=self.calendar_id,
+                            eventId=existing_event['event_id'],
+                            sendUpdates='none'  # Don't send emails for duplicate cleanup
+                        ).execute()
+                        logging.info(f"Deleted duplicate event (older) for Approval ID: {approval_id}")
+                        print(f"Deleted duplicate event (older) for Approval ID: {approval_id}")
+                        duplicates_deleted += 1
+                        # Keep the newer event
+                        approval_id_map[approval_id] = event_info
+                    except Exception as e:
+                        logging.error(f"Error deleting duplicate event: {str(e)}")
+                else:
+                    # Existing event is newer - delete the current one
+                    try:
+                        self.calendar_service.events().delete(
+                            calendarId=self.calendar_id,
+                            eventId=event_info['event_id'],
+                            sendUpdates='none'  # Don't send emails for duplicate cleanup
+                        ).execute()
+                        logging.info(f"Deleted duplicate event (older) for Approval ID: {approval_id}")
+                        print(f"Deleted duplicate event (older) for Approval ID: {approval_id}")
+                        duplicates_deleted += 1
+                        # Keep the existing (newer) event
+                    except Exception as e:
+                        logging.error(f"Error deleting duplicate event: {str(e)}")
+            else:
+                # First occurrence of this approval_id
+                approval_id_map[approval_id] = event_info
+        
+        if duplicates_deleted > 0:
+            logging.info(f"Removed {duplicates_deleted} duplicate calendar events")
+            print(f"Removed {duplicates_deleted} duplicate calendar events")
+        
+        return approval_id_map
     
     def update_calendar_event(self, event_id, event_body):
         """Update an existing calendar event"""
@@ -309,12 +385,9 @@ class LeaveRequestCalendar:
     def setup_sheets_headers(self):
         """Set up the headers in the Google Sheet if they don't exist"""
         if not self.sheets_id:
-            print("No sheets ID provided, skipping header setup")
             return
             
         try:
-            print(f"Setting up headers for sheet ID: {self.sheets_id}")
-            
             # Check if sheet exists and has headers
             result = self.sheets_service.spreadsheets().values().get(
                 spreadsheetId=self.sheets_id,
@@ -322,59 +395,47 @@ class LeaveRequestCalendar:
             ).execute()
             
             values = result.get('values', [])
-            print(f"Current header row: {values}")
             
             # Define the headers we want
             headers = [
                 'Approval ID', 'First Name', 'Last Name', 'Time Off Type', 
-                'Status', 'Start Time', 'End Time', 'Substitute', 'Sub Required?',
+                'Status', 'Start Time', 'End Time', 'Duration', 'Substitute', 'Sub Required?',
                 'Reason', 'Additional comments', 'Last Updated', 'Calendar Event Status'
             ]
             
             # If no headers exist or headers are different, set them
             if not values or values[0] != headers:
-                print("Setting up new headers...")
                 result = self.sheets_service.spreadsheets().values().update(
                     spreadsheetId=self.sheets_id,
-                    range='A1:M1',
+                    range='A1:N1',
                     valueInputOption='RAW',
                     body={'values': [headers]}
                 ).execute()
-                print(f"Headers update result: {result}")
                 logging.info("Headers set up in Google Sheet")
-            else:
-                print("Headers already exist and are correct")
         
         except Exception as e:
             logging.error(f"Error setting up sheet headers: {str(e)}")
-            print(f"Error setting up sheet headers: {str(e)}")
             import traceback
-            print(f"Full error traceback: {traceback.format_exc()}")
+            logging.error(f"Full traceback: {traceback.format_exc()}")
     
     def get_existing_sheet_data(self):
         """Get existing data from Google Sheets to avoid duplicates"""
         if not self.sheets_id:
-            print("No sheets ID provided, skipping existing data check")
             return {}
             
         try:
-            print("Getting existing sheet data...")
             result = self.sheets_service.spreadsheets().values().get(
                 spreadsheetId=self.sheets_id,
-                range='A:M'  # Adjust range as needed
+                range='A:N'  # Include all columns including Calendar Event Status
             ).execute()
             
             values = result.get('values', [])
-            print(f"Retrieved {len(values)} rows from sheet")
             
             if len(values) <= 1:  # Only headers or empty
-                print("Sheet is empty or only has headers")
                 return {}
             
             # Create a dictionary with Approval ID as key
             existing_data = {}
-            headers = values[0] if values else []
-            print(f"Sheet headers: {headers}")
             
             for i, row in enumerate(values[1:], 2):  # Start from row 2 (skip headers)
                 if row and len(row) > 0:  # Make sure row has data
@@ -384,19 +445,75 @@ class LeaveRequestCalendar:
                             'row_index': i,
                             'data': row
                         }
-                        print(f"Found existing data for approval ID: {approval_id} at row {i}")
-            
-            print(f"Found {len(existing_data)} existing records")
             return existing_data
             
         except Exception as e:
             logging.error(f"Error getting existing sheet data: {str(e)}")
-            print(f"Error getting existing sheet data: {str(e)}")
             import traceback
-            print(f"Full error traceback: {traceback.format_exc()}")
+            logging.error(f"Full traceback: {traceback.format_exc()}")
             return {}
     
-    def update_sheets_data(self, df, calendar_events_status):
+    def sync_calendar_to_sheets(self):
+        """Sync manually edited substitute names from calendar back to Google Sheets"""
+        if not self.sheets_id:
+            logging.info("No Google Sheets ID provided, skipping calendar sync")
+            return
+        
+        try:
+            logging.info("Syncing calendar edits to Google Sheets...")
+            
+            # Get all existing calendar events
+            existing_events = self.get_existing_events()
+            
+            # Get existing sheet data
+            existing_sheet_data = self.get_existing_sheet_data()
+            
+            updates = []
+            
+            for approval_id, event_info in existing_events.items():
+                # Check if this event has a substitute in the calendar
+                calendar_sub_name = event_info.get('calendar_sub_name')
+                
+                if approval_id in existing_sheet_data and calendar_sub_name:
+                    sheet_row = existing_sheet_data[approval_id]
+                    sheet_data = sheet_row['data']
+                    
+                    # Check if sheet has the substitute column (index 8)
+                    if len(sheet_data) > 8:
+                        sheet_sub_name = sheet_data[8] if sheet_data[8] else ''
+                        
+                        # If calendar substitute differs from sheet substitute, update the sheet
+                        # Don't sync "NEEDS SUB" placeholders
+                        if calendar_sub_name != sheet_sub_name and calendar_sub_name != 'NEEDS SUB':
+                            # Update the substitute column (column I, index 8)
+                            row_index = sheet_row['row_index']
+                            updates.append({
+                                'range': f'I{row_index}',
+                                'values': [[calendar_sub_name]]
+                            })
+                            logging.info(f"Syncing substitute for approval {approval_id}: '{sheet_sub_name}' -> '{calendar_sub_name}'")
+            
+            # Perform batch updates
+            if updates:
+                batch_update_body = {
+                    'valueInputOption': 'RAW',
+                    'data': updates
+                }
+                self.sheets_service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=self.sheets_id,
+                    body=batch_update_body
+                ).execute()
+                logging.info(f"Synced {len(updates)} manually edited substitutes from calendar to sheets")
+                print(f"Synced {len(updates)} manually edited substitutes from calendar to sheets")
+            else:
+                logging.info("No calendar edits to sync to sheets")
+                
+        except Exception as e:
+            logging.error(f"Error syncing calendar to sheets: {str(e)}")
+            import traceback
+            logging.error(f"Full traceback: {traceback.format_exc()}")
+    
+    def update_sheets_data(self, df, calendar_events_status, manually_edited_subs):
         """Update Google Sheets with leave request data"""
         if not self.sheets_id:
             logging.info("No Google Sheets ID provided, skipping sheets update")
@@ -416,8 +533,8 @@ class LeaveRequestCalendar:
             
             # First, check existing sheet data for "Previously Deleted" entries that should be removed
             for approval_id, data_info in existing_data.items():
-                if len(data_info['data']) > 12:  # Make sure we have the calendar status column
-                    existing_calendar_status = data_info['data'][12]  # Calendar Event Status is column M (index 12)
+                if len(data_info['data']) >= 14:  # Make sure we have the calendar status column
+                    existing_calendar_status = data_info['data'][13]  # Calendar Event Status is column N (index 13)
                     if existing_calendar_status == 'Previously Deleted':
                         rows_to_delete.append({
                             'approval_id': approval_id,
@@ -444,6 +561,29 @@ class LeaveRequestCalendar:
                 if any(item['approval_id'] == approval_id for item in rows_to_delete):
                     continue
                 
+                # Get duration from Excel file (already calculated by Ubiquiti)
+                duration = ""
+                if 'Amount (Hours)' in row and pd.notna(row['Amount (Hours)']):
+                    amount_str = str(row['Amount (Hours)'])
+                    # Extract numeric value from strings like "8 Hours" or "8.5"
+                    import re
+                    hours_match = re.search(r'(\d+\.?\d*)', amount_str)
+                    if hours_match:
+                        hours = float(hours_match.group(1))
+                        if hours < 24:
+                            duration = f"{hours:.1f} hours"
+                        else:
+                            days = int(hours // 24)
+                            remaining_hours = hours % 24
+                            if remaining_hours == 0:
+                                duration = f"{days} day{'s' if days != 1 else ''}"
+                            else:
+                                duration = f"{days} day{'s' if days != 1 else ''}, {remaining_hours:.1f} hours"
+                
+                # Determine which substitute name to use
+                # Priority: manually edited sub from calendar > Ubiquiti data
+                substitute_to_use = manually_edited_subs.get(approval_id, row['Substitute'] if pd.notna(row['Substitute']) else '')
+                
                 # Prepare row data for non-deleted events
                 row_data = [
                     approval_id,
@@ -453,7 +593,8 @@ class LeaveRequestCalendar:
                     row['Status'],
                     row['Start Time'].strftime('%Y-%m-%d %H:%M:%S') if pd.notna(row['Start Time']) else '',
                     row['End Time'].strftime('%Y-%m-%d %H:%M:%S') if pd.notna(row['End Time']) else '',
-                    row['Substitute'] if pd.notna(row['Substitute']) else '',
+                    duration,
+                    substitute_to_use,  # Use the calendar version if it was manually edited
                     row['Sub Required?'],
                     row['Reason'] if pd.notna(row['Reason']) else '',
                     row['Additional comments'] if pd.notna(row['Additional comments']) else '',
@@ -465,7 +606,7 @@ class LeaveRequestCalendar:
                     # Update existing row
                     row_index = existing_data[approval_id]['row_index']
                     updates.append({
-                        'range': f'A{row_index}:M{row_index}',
+                        'range': f'A{row_index}:N{row_index}',
                         'values': [row_data]
                     })
                 else:
@@ -501,7 +642,7 @@ class LeaveRequestCalendar:
             if new_rows:
                 self.sheets_service.spreadsheets().values().append(
                     spreadsheetId=self.sheets_id,
-                    range='A:M',
+                    range='A:N',
                     valueInputOption='RAW',
                     insertDataOption='INSERT_ROWS',
                     body={'values': new_rows}
@@ -512,58 +653,138 @@ class LeaveRequestCalendar:
             logging.error(f"Error updating Google Sheets: {str(e)}")
     
     def create_calendar_events(self, excel_path):
-        """Read Excel and create calendar events for each leave request"""
+        """Read Excel (all sheets) and create calendar events for each leave request"""
         
-        # Read Excel file
-        df = pd.read_excel(excel_path)
+        # Read all sheets into a dict {sheet_name: DataFrame}
+        sheets = pd.read_excel(excel_path, sheet_name=None)
         
-        # Convert 'Start Time' and 'End Time' to datetime
-        df['Start Time'] = pd.to_datetime(df['Start Time']) 
-        df['End Time'] = pd.to_datetime(df['End Time'])
-        
-        # Get existing events
+        # Get existing events from calendar (calendar entries take precedence)
         existing_events = self.get_existing_events()
         
-        # Initialize counters
-        created_count = 0
-        existing_count = 0
-        deleted_count = 0
-        ignored_count = 0
-        
-        # Track calendar event statuses for sheets update
+        # Initialize counters and status map
+        created_count = existing_count = deleted_count = ignored_count = 0
         calendar_events_status = {}
+        manually_edited_subs = {}  # Track manually edited substitutes
         
-        for _, row in df.iterrows():
+        # Combine all sheets into a single DataFrame
+        all_data = []
+        for sheet_name, df in sheets.items():
+            if df is None or df.empty:
+                continue
+            # Ensure datetimes are parsed per-sheet
+            df['Start Time'] = pd.to_datetime(df['Start Time'], errors='coerce')
+            df['End Time'] = pd.to_datetime(df['End Time'], errors='coerce')
+            all_data.append(df)
+        
+        # If no data found, just sync calendar to sheets and return
+        if not all_data:
+            logging.info("No new data in Excel file - syncing existing calendar events to sheets")
+            self.sync_calendar_to_sheets()
+            return
+        
+        combined_df = pd.concat(all_data, ignore_index=True)
+        logging.info(f"Processing {len(combined_df)} total rows from {len(all_data)} sheets")
+        
+        # Process the combined DataFrame
+        for _, row in combined_df.iterrows():
             # Create full name
             full_name = f"{row['First Name']} {row['Last Name']}"
             
-            event = {
-                'summary': (f"{row['Substitute']} sub for {full_name} - {row['Time Off Type']}" 
-                            if pd.notna(row['Substitute']) and str(row['Substitute']).strip() != ''
-                            else f"NEEDS SUB - {full_name} - {row['Time Off Type']}"
-                            if row['Sub Required?'].lower() == 'yes'
-                            else f"{full_name} (No Sub) - {row['Time Off Type']}"),
-                'description': (f"Approval ID: {row['Approval ID']}\n\n"
-                                f"Reason: {row['Reason']}\n\n"
-                                f"Additional Comments: {row['Additional comments']}"),
-                'start': {
-                    'dateTime': row['Start Time'].isoformat(),
-                    'timeZone': 'America/New_York',
-                },
-                'end': {
-                    'dateTime': row['End Time'].isoformat(),
-                    'timeZone': 'America/New_York',
-                },
-                'reminders': {
-                    'useDefault': True
-                }
-            }
-            
-            # Initialize approval_id
+            # Initialize approval_id early since we need it for all-day check
             approval_id = str(row['Approval ID'])
             
-            if approval_id in existing_events and (row['Status'] == 'Approved'): # or row['Status'] == 'Pending'):
-                # Path 1: Event exists - update it if needed
+            # Define default summary based on Ubiquiti data
+            default_summary = (f"{row['Substitute']}/{full_name}/{row['Time Off Type']}" 
+                            if pd.notna(row['Substitute']) and str(row['Substitute']).strip() != ''
+                            else f"NEEDS SUB/{full_name}/{row['Time Off Type']}"
+                            if row['Sub Required?'].lower() == 'yes'
+                            else f"No Sub/{full_name}/{row['Time Off Type']}")
+            
+            # Determine if this should be an all-day event
+            start_time = row['Start Time']
+            end_time = row['End Time']
+            is_all_day = False
+            
+            if pd.notna(start_time) and pd.notna(end_time):
+                # Get duration from Excel file (already calculated by Ubiquiti)
+                duration_hours = 0
+                if 'Amount (Hours)' in row and pd.notna(row['Amount (Hours)']):
+                    amount_str = str(row['Amount (Hours)'])
+                    # Extract numeric value from strings like "8 Hours" or "8.5"
+                    import re
+                    hours_match = re.search(r'(\d+\.?\d*)', amount_str)
+                    if hours_match:
+                        duration_hours = float(hours_match.group(1))
+                
+                # Check if it covers the full school day
+                start_hour = start_time.hour + start_time.minute / 60
+                end_hour = end_time.hour + end_time.minute / 60
+                
+                # Criteria: starts at or before 9 AM, ends at or after 3 PM, and duration >= 6 hours
+                if start_hour <= 9 and end_hour >= 15.0 and duration_hours >= 6.0:
+                    is_all_day = True
+            
+            # Create event structure based on whether it's all-day
+            if is_all_day:
+                # All-day events use 'date' instead of 'dateTime'
+                event = {
+                    'summary': default_summary,
+                    'description': (f"Approval ID: {row['Approval ID']}\n\n"
+                                    f"Reason: {row['Reason']}\n\n"
+                                    f"Additional Comments: {row['Additional comments']}"),
+                    'start': {
+                        'date': start_time.strftime('%Y-%m-%d'),
+                        'timeZone': 'America/New_York',
+                    },
+                    'end': {
+                        'date': end_time.strftime('%Y-%m-%d'),
+                        'timeZone': 'America/New_York',
+                    },
+                    'reminders': {
+                        'useDefault': True
+                    }
+                }
+            else:
+                # Regular timed event
+                event = {
+                    'summary': default_summary,
+                    'description': (f"Approval ID: {row['Approval ID']}\n\n"
+                                    f"Reason: {row['Reason']}\n\n"
+                                    f"Additional Comments: {row['Additional comments']}"),
+                    'start': {
+                        'dateTime': start_time.isoformat(),
+                        'timeZone': 'America/New_York',
+                    },
+                    'end': {
+                        'dateTime': end_time.isoformat(),
+                        'timeZone': 'America/New_York',
+                    },
+                    'reminders': {
+                        'useDefault': True
+                    }
+                }
+            
+            if approval_id in existing_events and (row['Status'] == 'Approved'):
+                
+                # Check if there's a substitute in the calendar
+                existing_event_info = existing_events[approval_id]
+                existing_sub_name = existing_event_info.get('calendar_sub_name')
+                
+                # Get the Ubiquiti substitute data
+                ubiquiti_sub = str(row['Substitute']).strip() if pd.notna(row['Substitute']) else ''
+                
+                # Check if calendar has a valid substitute name (not "NEEDS SUB" placeholder)
+                if existing_sub_name and existing_sub_name != 'NEEDS SUB':
+                    # Calendar has a real substitute name
+                    # Always preserve what's in the calendar and use it
+                    event['summary'] = f"{existing_sub_name}/{full_name}/{row['Time Off Type']}"
+                    manually_edited_subs[approval_id] = existing_sub_name
+                    
+                    # Log only if it differs from Ubiquiti (indicating a manual edit)
+                    if existing_sub_name != ubiquiti_sub:
+                        logging.info(f"Preserving manually edited sub '{existing_sub_name}' for {full_name} (Ubiquiti has '{ubiquiti_sub}')")
+
+                # Update the event
                 try:    
                     success = self.update_calendar_event(
                         existing_events[approval_id]['event_id'],
@@ -572,14 +793,15 @@ class LeaveRequestCalendar:
                     if success:
                         existing_count += 1
                         calendar_events_status[approval_id] = 'Updated'
-                        print(f"Existing calendar event for {full_name}")
+                        print(f"Updated calendar event for {full_name}")
                     else:
                         calendar_events_status[approval_id] = 'Update Failed'
                 except Exception as e:
                     calendar_events_status[approval_id] = 'Update Error'
                     print(f"Error updating calendar event for {full_name}: {str(e)}")
+                    
             elif approval_id in existing_events and (row['Status'] == 'Rejected' or row['Status'] == 'Revoked'):
-                # Path 2: Event exists - delete it
+                # Delete the event
                 try:
                     self.calendar_service.events().delete(
                         calendarId=self.calendar_id,
@@ -597,12 +819,14 @@ class LeaveRequestCalendar:
                 except Exception as e:
                     calendar_events_status[approval_id] = 'Delete Error'
                     print(f"Error deleting event: {str(e)}")
+                    
             elif approval_id in self.deleted_set: 
-                # Path 3: Event was previously deleted - ignore it
+                # Event was previously deleted - ignore it
                 ignored_count += 1
                 calendar_events_status[approval_id] = 'Previously Deleted'
+                
             else:
-                # Path 4: Completely new event - create a new event
+                # Create new event
                 try:
                     self.calendar_service.events().insert(
                         calendarId=self.calendar_id,
@@ -621,11 +845,13 @@ class LeaveRequestCalendar:
         print(f"Updated {existing_count} existing events")
         print(f"Deleted {deleted_count} existing events")
         print(f"Ignored {ignored_count} previously deleted events")
+        if manually_edited_subs:
+            print(f"Preserved {len(manually_edited_subs)} manually edited substitutes")
         
-        # Update Google Sheets with all data
+        # Pass the combined DataFrame to update_sheets_data with manually edited subs
         if self.sheets_id:
             logging.info("Updating Google Sheets...")
-            self.update_sheets_data(df, calendar_events_status)
+            self.update_sheets_data(combined_df, calendar_events_status, manually_edited_subs)
             print("Google Sheets updated successfully")
 
 def main():
@@ -635,11 +861,12 @@ def main():
         # Information for the Google Calendar API
         service_account_file = os.getenv("SERVICE_ACCOUNT_FILE")
         CALENDAR_ID = os.getenv("CALENDAR_ID")
-        SHEETS_ID = os.getenv("SHEETS_ID")  # New environment variable
+        SHEETS_ID = os.getenv("SHEETS_ID")
         DOWNLOAD_DIR = os.path.expanduser("~/Downloads")
         
         # Create calendar manager
         calendar_manager = LeaveRequestCalendar(service_account_file, CALENDAR_ID, SHEETS_ID)
+        
         
         # Download Excel file
         logging.info("Downloading Excel file...")
@@ -655,7 +882,10 @@ def main():
         logging.info("Calendar and Sheets update completed successfully")
         
     except Exception as e:
-        print(f"Error: {str(e)}")
+        logging.error(f"Error in main execution: {str(e)}")
+        import traceback
+        logging.error(f"Full traceback: {traceback.format_exc()}")
+        raise
 
 if __name__ == "__main__":
     main()
