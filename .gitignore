@@ -1,0 +1,12 @@
+# Secrets and local runtime files (never commit)
+.env
+.env.*
+credentials.json
+token.json
+
+# Downloaded binaries and local state
+chromedriver-win64/
+venv/
+logs/
+__pycache__/
+*.xlsx
