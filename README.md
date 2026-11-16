@@ -27,3 +27,10 @@ How to run the program manually:
  3. run the program (python leave_requests.py)
 
 A more detailed description of the program itself can be found in the comments within the program
+
+How cancelled leave is handled:
+
+ - Revoking or rejecting the request in Ubiquiti removes the calendar event and the Google Sheet row on the next run. This is the authoritative way to cancel leave and works for past and future dates.
+ - Deleting the event from Google Calendar by hand also works for leave that has not started yet. On the next run the program notices the event is gone, drops the row from the Google Sheet (so dashboards built on it update), and records the Approval ID in the deleted-events file so the event is not re-created.
+ - Deleting a calendar event for leave whose date has already passed does not remove the record; the event is re-created on the next run. Revoke it in Ubiquiti instead.
+ - To bring a request back after it was removed by hand, delete its Approval ID from the deleted-events file; the event and sheet row are re-created on the next run.

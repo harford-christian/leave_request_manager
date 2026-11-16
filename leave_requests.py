@@ -513,6 +513,24 @@ class LeaveRequestCalendar:
             import traceback
             logging.error(f"Full traceback: {traceback.format_exc()}")
     
+    def was_removed_from_calendar(self, approval_id, existing_sheet_data, start_time):
+        """Return True when a request this script already synced to the calendar is no longer on it
+        and its leave date has not passed yet - i.e. someone removed the event from Google Calendar by hand.
+        Only called for approved requests that have no calendar event and are not in the deleted list."""
+        sheet_row = existing_sheet_data.get(approval_id)
+        if not sheet_row:
+            return False  # Never synced before: this is a genuinely new request
+        
+        data = sheet_row['data']
+        synced_status = data[13] if len(data) > 13 else ''  # Calendar Event Status is column N (index 13)
+        if synced_status not in ('Created', 'Updated'):
+            return False  # The event never made it onto the calendar (e.g. 'Create Error'), so retry it
+        
+        if pd.isna(start_time) or start_time.date() < datetime.now().date():
+            return False  # Leave already started or was taken; past records should be revoked in Ubiquiti instead
+        
+        return True
+    
     def update_sheets_data(self, df, calendar_events_status, manually_edited_subs):
         """Update Google Sheets with leave request data"""
         if not self.sheets_id:
@@ -661,8 +679,12 @@ class LeaveRequestCalendar:
         # Get existing events from calendar (calendar entries take precedence)
         existing_events = self.get_existing_events()
         
+        # Get the rows already in the sheet so we can tell a brand-new request apart from one
+        # whose calendar event was removed by hand (see the manual-removal branch below)
+        existing_sheet_data = self.get_existing_sheet_data() if self.sheets_id else {}
+        
         # Initialize counters and status map
-        created_count = existing_count = deleted_count = ignored_count = 0
+        created_count = existing_count = deleted_count = ignored_count = removed_manually_count = 0
         calendar_events_status = {}
         manually_edited_subs = {}  # Track manually edited substitutes
         
@@ -825,6 +847,21 @@ class LeaveRequestCalendar:
                 ignored_count += 1
                 calendar_events_status[approval_id] = 'Previously Deleted'
                 
+            elif (row['Status'] == 'Approved'
+                  and self.was_removed_from_calendar(approval_id, existing_sheet_data, start_time)):
+                # This script already put the event on the calendar (the sheet row says so) but it is
+                # no longer there and the leave hasn't started yet, so a supervisor removed it on
+                # purpose (e.g. a rescheduled appointment). Treat it like a revoked request: remember
+                # the ID so the event is not re-created, and let update_sheets_data drop the row.
+                removed_manually_count += 1
+                calendar_events_status[approval_id] = 'Deleted'
+                print(f"Calendar event for {full_name} was removed manually - dropping it from the sheet")
+                logging.info(f"Calendar event for approval {approval_id} ({full_name}) was removed manually; treating it as cancelled")
+                try:
+                    self.load_and_save_deleted_events(approval_id)
+                except Exception as e:
+                    print(f"Error adding event to deleted events: {str(e)}")
+                
             else:
                 # Create new event
                 try:
@@ -845,6 +882,7 @@ class LeaveRequestCalendar:
         print(f"Updated {existing_count} existing events")
         print(f"Deleted {deleted_count} existing events")
         print(f"Ignored {ignored_count} previously deleted events")
+        print(f"Dropped {removed_manually_count} events that were removed from the calendar manually")
         if manually_edited_subs:
             print(f"Preserved {len(manually_edited_subs)} manually edited substitutes")
         
